@@ -1,0 +1,30 @@
+'use strict';
+// Concurrency test: 40 clients bid at the same instant on one listing; verifies correctness + persistence.
+process.env.DB_FILE = require('path').join(require('os').tmpdir(), 'auction-test-' + Date.now() + '.db');
+const assert = require('assert'), server = require('./server');
+const base = () => `127.0.0.1:${server.address().port}`;
+const api = (p, o = {}) => fetch(`http://${base()}${p}`, { ...o, headers: { 'Content-Type': 'application/json', ...(o.headers || {}) } }).then(r => r.json());
+const open = token => new Promise(res => { const ws = new WebSocket(`ws://${base()}/ws?token=${token}`); ws.snap = null;
+  ws.onmessage = e => { const m = JSON.parse(e.data); if (m.type === 'snapshot') { ws.snap = m; res(ws); } if (m.type === 'ack') ws.acks?.get(m.reqId)?.(m); }; ws.acks = new Map(); });
+const bidWs = (ws, auctionId, amount) => new Promise(r => { const reqId = Math.random().toString(36).slice(2); ws.acks.set(reqId, r); ws.send(JSON.stringify({ type: 'bid', reqId, auctionId, amount })); });
+server.listen(0, async () => {
+  const users = await Promise.all(Array.from({ length: 40 }, (_, i) => api('/api/session', { method: 'POST', body: JSON.stringify({ name: 'Bidder ' + i }) })));
+  const socks = await Promise.all(users.map(u => open(u.token)));
+  const a0 = socks[0].snap.auctions.find(a => a.id === 1), floor = a0.startPrice;
+  const amounts = socks.map(() => floor + 5000 * Math.floor(Math.random() * 15));
+  const acks = await Promise.all(socks.map((s, i) => bidWs(s, 1, amounts[i])));
+  const final = (await api('/api/auctions')).auctions.find(a => a.id === 1);
+  const ok = acks.filter(a => a.ok), accepted = amounts.filter((_, i) => acks[i].ok);
+  assert.strictEqual(final.price, Math.max(...amounts), 'highest bid must win');
+  assert.strictEqual(final.bids, ok.length, 'bid count matches accepted bids');
+  assert.strictEqual(new Set(accepted).size, accepted.length, 'no duplicate amounts accepted');
+  console.log(`PASS race: ${ok.length} accepted / ${acks.length - ok.length} rejected, winning bid $${final.price}`);
+  const late = await bidWs(socks[0], 1, final.price); assert.ok(!late.ok, 'stale/equal bid rejected'); console.log('PASS stale bid rejected:', late.code);
+  const rid = 'retry-1', t = users[1].token, hdr = { Authorization: 'Bearer ' + t }, hi = final.price + 5000 * 20;
+  const r1 = await api('/api/auctions/1/bids', { method: 'POST', headers: hdr, body: JSON.stringify({ amount: hi, requestId: rid }) });
+  const r2 = await api('/api/auctions/1/bids', { method: 'POST', headers: hdr, body: JSON.stringify({ amount: hi, requestId: rid }) });
+  assert.ok(r1.ok && r2.ok && r2.auction.bids === r1.auction.bids, 'retry with same requestId is idempotent'); console.log('PASS idempotent retry');
+  socks.forEach(s => s.close()); await new Promise(r => setTimeout(r, 200));
+  const again = await open(users[2].token); assert.strictEqual(again.snap.auctions.find(a => a.id === 1).price, hi, 'reconnect sees persisted state');
+  console.log('PASS reconnect receives current persisted state'); again.close(); process.exit(0);
+});

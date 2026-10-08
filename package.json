@@ -1,0 +1,12 @@
+{
+  "name": "realtime-bidding",
+  "version": "1.0.0",
+  "description": "Live property auction: WebSocket push, SQLite transactions, reconnect-safe.",
+  "main": "server.js",
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server.js",
+    "test": "node --disable-warning=ExperimentalWarning test.js",
+    "reset": "node -e \"for(const f of ['data.db','data.db-wal','data.db-shm'])try{require('fs').unlinkSync(f)}catch{}\""
+  }
+}
